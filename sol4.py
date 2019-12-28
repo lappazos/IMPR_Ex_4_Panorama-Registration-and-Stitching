@@ -8,13 +8,25 @@ import matplotlib.pyplot as plt
 
 from scipy.ndimage.morphology import generate_binary_structure
 from scipy.ndimage.filters import maximum_filter
-from scipy.ndimage import label, center_of_mass
+from scipy.ndimage import label, center_of_mass, map_coordinates
 import sol4_utils
 import scipy.signal
+
+N = 7
+
+M = 7
+
+DESC_RAD = 3
+
+PYR_LVL_TO_USE = 2
+
+ORIGINAL_IMAGE = 0
 
 der_vec = np.array([1, 0, -1]).reshape(1, 3)
 
 K = 0.04
+
+MIN_SCORE = 0.5
 
 
 def harris_corner_detector(im):
@@ -29,12 +41,11 @@ def harris_corner_detector(im):
     blur_ix_squared = sol4_utils.blur_spatial(dx * dx, 3)
     blur_iy_squared = sol4_utils.blur_spatial(dy * dy, 3)
     blur_ix_iy = sol4_utils.blur_spatial(dx * dy, 3)
-    # m_right = np.concatenate((blur_ix_iy, blur_iy_squared), axis=0)
-    # m_left = np.concatenate((blur_ix_squared, blur_ix_iy), axis=0)
-    # M = np.concatenate((m_left, m_right), axis=1)
     det_m = blur_ix_squared * blur_iy_squared - blur_ix_iy * blur_ix_iy
     trace_m = blur_iy_squared + blur_ix_squared
     R = det_m - K * np.square(trace_m)
+    R = non_maximum_suppression(R)
+    return np.flip(np.argwhere(R).reshape(-1, 2), 1)
 
 
 def sample_descriptor(im, pos, desc_rad):
@@ -45,7 +56,38 @@ def sample_descriptor(im, pos, desc_rad):
     :param desc_rad: "Radius" of descriptors to compute.
     :return: A 3D array with shape (N,K,K) containing the ith descriptor at desc[i,:,:].
     """
-    pass
+
+    def sample_descriptor_per_pixel(coordinate):
+        """
+        Samples descriptor at the given corner
+        :param coordinate: the [x,y] coordinates of an corner point
+        :return: A 2D array with shape (K,K) containing the descriptor.
+        """
+        x = np.linspace(coordinate[0] - desc_rad, coordinate[0] + desc_rad, desc_rad * 2 + 1)
+        y = np.linspace(coordinate[1] - desc_rad, coordinate[1] + desc_rad, desc_rad * 2 + 1)
+        xv, yv = np.meshgrid(x, y)
+        # stack in flip
+        coordinates_float = np.stack((yv, xv), axis=0)
+        # todo check args for map_coordinates
+        descriptor = map_coordinates(im, coordinates_float, order=1, prefilter=False)
+        mean = np.mean(descriptor)
+        temp = descriptor - mean
+        # todo check division by zero
+        return temp / np.linalg.norm(temp)
+
+    # todo check if vectorize better than for
+    return np.vectorize(sample_descriptor_per_pixel)(pos)
+
+
+def get_pyramid_coordinates(pos, input_level, output_level):
+    """
+    adjust coordinates between pyramids
+    :param pos: coordinated in input level
+    :param input_level: input level index
+    :param output_level: output level index
+    :return: adjusted pyramid coordinates
+    """
+    return 2 ^ (input_level - output_level) * pos
 
 
 def find_features(pyr):
@@ -57,7 +99,11 @@ def find_features(pyr):
                    These coordinates are provided at the pyramid level pyr[0].
                 2) A feature descriptor array with shape (N,K,K)
     """
-    pass
+    corners = spread_out_corners(pyr[ORIGINAL_IMAGE], M, N, DESC_RAD * 2 ^ PYR_LVL_TO_USE)
+    descriptors = sample_descriptor(pyr[PYR_LVL_TO_USE],
+                                    get_pyramid_coordinates(corners, ORIGINAL_IMAGE, PYR_LVL_TO_USE),
+                                    DESC_RAD)
+    return [corners, descriptors]
 
 
 def match_features(desc1, desc2, min_score):
@@ -70,7 +116,15 @@ def match_features(desc1, desc2, min_score):
                 1) An array with shape (M,) and dtype int of matching indices in desc1.
                 2) An array with shape (M,) and dtype int of matching indices in desc2.
     """
-    pass
+    score_matrix = desc1.reshape(len(desc1), -1) @ desc2.reshape(len(desc2), -1).T
+    first_axis_max = np.sort(score_matrix, axis=0)[1, :]
+    second_axis_max = np.sort(score_matrix, axis=1)[:, 1]
+    second_biggest_second_axis = np.where(score_matrix >= second_axis_max, True, False)
+    second_biggest_first_axis = np.where(score_matrix.T >= first_axis_max, True, False).T
+    final_matrix = np.logical_and(np.logical_and(second_biggest_first_axis, second_biggest_second_axis),
+                                  score_matrix > min_score)
+    match_points = np.argwhere(final_matrix)
+    return [match_points[:, 0], match_points[:, 1]]
 
 
 def apply_homography(pos1, H12):
@@ -80,14 +134,16 @@ def apply_homography(pos1, H12):
     :param H12: A 3x3 homography matrix.
     :return: An array with the same shape as pos1 with [x,y] point coordinates obtained from transforming pos1 using H12.
     """
-    pass
+    pos1 = np.concatenate((pos1, np.ones(pos1.shape[0]).reshape(3, 1)))
+    x2_y2_z2 = H12 @ pos1.T
+    return (x2_y2_z2[:2, :] / x2_y2_z2[2, :]).T
 
 
 def ransac_homography(points1, points2, num_iter, inlier_tol, translation_only=False):
     """
     Computes homography between two sets of points using RANSAC.
-    :param pos1: An array with shape (N,2) containing N rows of [x,y] coordinates of matched points in image 1.
-    :param pos2: An array with shape (N,2) containing N rows of [x,y] coordinates of matched points in image 2.
+    :param points1: An array with shape (N,2) containing N rows of [x,y] coordinates of matched points in image 1.
+    :param points2: An array with shape (N,2) containing N rows of [x,y] coordinates of matched points in image 2.
     :param num_iter: Number of RANSAC iterations to perform.
     :param inlier_tol: inlier tolerance threshold.
     :param translation_only: see estimate rigid transform
@@ -96,7 +152,15 @@ def ransac_homography(points1, points2, num_iter, inlier_tol, translation_only=F
                 2) An Array with shape (S,) where S is the number of inliers,
                     containing the indices in pos1/pos2 of the maximal set of inlier matches found.
     """
-    pass
+    if translation_only:
+        rand_one = np.random.choice(len(points1), 1)
+        H12 = estimate_rigid_transform(points1[rand_one].reshape((1, 2)),
+                                       points2[rand_one].reshape((1, 2)), translation_only)
+    else:
+        rand_one, rand_two = np.random.choice(len(points1), 2)
+        H12 = estimate_rigid_transform(np.stack((points1[rand_one], points1[rand_two])),
+                                       np.stack((points2[rand_one], points2[rand_two])), translation_only)
+    
 
 
 def display_matches(im1, im2, points1, points2, inliers):
@@ -394,3 +458,11 @@ class PanoramicVideoGenerator:
         plt.figure(figsize=figsize)
         plt.imshow(self.panoramas[panorama_index].clip(0, 1))
         plt.show()
+
+
+if __name__ == '__main__':
+    im = plt.imread('external\\oxford1.jpg')
+    implot = plt.imshow(im)
+    corners = spread_out_corners(sol4_utils.read_image('external\\oxford1.jpg', sol4_utils.GREYSCALE), 7, 7, 3)
+    plt.scatter(x=corners[:, 0], y=corners[:, 1], c='r', s=1)
+    plt.show()
