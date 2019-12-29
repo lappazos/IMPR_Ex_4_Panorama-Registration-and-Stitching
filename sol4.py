@@ -56,15 +56,11 @@ def sample_descriptor(im, pos, desc_rad):
     :param desc_rad: "Radius" of descriptors to compute.
     :return: A 3D array with shape (N,K,K) containing the ith descriptor at desc[i,:,:].
     """
-
-    def sample_descriptor_per_pixel(coordinate):
-        """
-        Samples descriptor at the given corner
-        :param coordinate: the [x,y] coordinates of an corner point
-        :return: A 2D array with shape (K,K) containing the descriptor.
-        """
-        x = np.linspace(coordinate[0] - desc_rad, coordinate[0] + desc_rad, desc_rad * 2 + 1)
-        y = np.linspace(coordinate[1] - desc_rad, coordinate[1] + desc_rad, desc_rad * 2 + 1)
+    square_size = desc_rad * 2 + 1
+    descriptors = np.empty((len(pos), square_size, square_size))
+    for coordinate in range(len(pos)):
+        x = np.linspace(pos[coordinate][0] - desc_rad, pos[coordinate][0] + desc_rad, square_size)
+        y = np.linspace(pos[coordinate][1] - desc_rad, pos[coordinate][1] + desc_rad, square_size)
         xv, yv = np.meshgrid(x, y)
         # stack in flip
         coordinates_float = np.stack((yv, xv), axis=0)
@@ -73,10 +69,8 @@ def sample_descriptor(im, pos, desc_rad):
         mean = np.mean(descriptor)
         temp = descriptor - mean
         # todo check division by zero
-        return temp / np.linalg.norm(temp)
-
-    # todo check if vectorize better than for
-    return np.vectorize(sample_descriptor_per_pixel)(pos)
+        descriptors[coordinate, :, :] = temp / np.linalg.norm(temp)
+    return descriptors
 
 
 def get_pyramid_coordinates(pos, input_level, output_level):
@@ -87,7 +81,7 @@ def get_pyramid_coordinates(pos, input_level, output_level):
     :param output_level: output level index
     :return: adjusted pyramid coordinates
     """
-    return 2 ^ (input_level - output_level) * pos
+    return pow(2, input_level - output_level) * pos
 
 
 def find_features(pyr):
@@ -99,7 +93,7 @@ def find_features(pyr):
                    These coordinates are provided at the pyramid level pyr[0].
                 2) A feature descriptor array with shape (N,K,K)
     """
-    corners = spread_out_corners(pyr[ORIGINAL_IMAGE], M, N, DESC_RAD * 2 ^ PYR_LVL_TO_USE)
+    corners = spread_out_corners(pyr[ORIGINAL_IMAGE], M, N, DESC_RAD * pow(2, PYR_LVL_TO_USE))
     descriptors = sample_descriptor(pyr[PYR_LVL_TO_USE],
                                     get_pyramid_coordinates(corners, ORIGINAL_IMAGE, PYR_LVL_TO_USE),
                                     DESC_RAD)
@@ -117,14 +111,14 @@ def match_features(desc1, desc2, min_score):
                 2) An array with shape (M,) and dtype int of matching indices in desc2.
     """
     score_matrix = desc1.reshape(len(desc1), -1) @ desc2.reshape(len(desc2), -1).T
-    first_axis_max = np.sort(score_matrix, axis=0)[1, :]
-    second_axis_max = np.sort(score_matrix, axis=1)[:, 1]
-    second_biggest_second_axis = np.where(score_matrix >= second_axis_max, True, False)
-    second_biggest_first_axis = np.where(score_matrix.T >= first_axis_max, True, False).T
+    first_axis_max = np.sort(score_matrix, axis=0)[-2, :]
+    second_axis_max = np.sort(score_matrix, axis=1)[:, -2]
+    second_biggest_second_axis = score_matrix >= second_axis_max.reshape(-1, 1)
+    second_biggest_first_axis = (score_matrix.T >= first_axis_max.reshape(-1, 1)).T
     final_matrix = np.logical_and(np.logical_and(second_biggest_first_axis, second_biggest_second_axis),
                                   score_matrix > min_score)
     match_points = np.argwhere(final_matrix)
-    return [match_points[:, 0], match_points[:, 1]]
+    return [match_points[:, 0].astype(int), match_points[:, 1].astype(int)]
 
 
 def apply_homography(pos1, H12):
@@ -134,7 +128,7 @@ def apply_homography(pos1, H12):
     :param H12: A 3x3 homography matrix.
     :return: An array with the same shape as pos1 with [x,y] point coordinates obtained from transforming pos1 using H12.
     """
-    pos1 = np.concatenate((pos1, np.ones(pos1.shape[0]).reshape(3, 1)))
+    pos1 = np.concatenate((pos1, np.ones(pos1.shape[0]).reshape(-1, 1)),axis=1)
     x2_y2_z2 = H12 @ pos1.T
     return (x2_y2_z2[:2, :] / x2_y2_z2[2, :]).T
 
@@ -152,15 +146,25 @@ def ransac_homography(points1, points2, num_iter, inlier_tol, translation_only=F
                 2) An Array with shape (S,) where S is the number of inliers,
                     containing the indices in pos1/pos2 of the maximal set of inlier matches found.
     """
-    if translation_only:
-        rand_one = np.random.choice(len(points1), 1)
-        H12 = estimate_rigid_transform(points1[rand_one].reshape((1, 2)),
-                                       points2[rand_one].reshape((1, 2)), translation_only)
-    else:
-        rand_one, rand_two = np.random.choice(len(points1), 2)
-        H12 = estimate_rigid_transform(np.stack((points1[rand_one], points1[rand_two])),
-                                       np.stack((points2[rand_one], points2[rand_two])), translation_only)
-    
+    max_inliers = [None, 0]
+    for iteration in range(num_iter):
+
+        if translation_only:
+            rand_indices = np.random.choice(len(points1), 1)
+        else:
+            rand_indices = np.random.choice(len(points1), 2)
+        H12 = estimate_rigid_transform(np.take(points1, rand_indices, axis=0), np.take(points2, rand_indices, axis=0),
+                                       translation_only)
+        p2_tag = apply_homography(points1, H12)
+        distance = np.square(np.linalg.norm(p2_tag - points2,axis=1))
+        inliers_indices_bool = distance < inlier_tol
+        inliers_num = np.sum(inliers_indices_bool)
+        if inliers_num > max_inliers[1]:
+            max_inliers = [inliers_indices_bool, inliers_num]
+    inliers_indices = np.argwhere(max_inliers[0])
+    H12_final = estimate_rigid_transform(np.take(points1, inliers_indices, axis=0),
+                                         np.take(points2, inliers_indices, axis=0), translation_only)
+    return [H12_final, inliers_indices.reshape(-1, )]
 
 
 def display_matches(im1, im2, points1, points2, inliers):
@@ -172,7 +176,20 @@ def display_matches(im1, im2, points1, points2, inliers):
     :param pos2: An aray shape (N,2), containing N rows of [x,y] coordinates of matched points in im2.
     :param inliers: An array with shape (S,) of inlier matches.
     """
-    pass
+    im = np.hstack(im1, im2)
+    points2[:, 0] += im1.shape[1]
+    plt.imshow(im)
+    points1_inliers = np.take(points1, inliers)
+    points2_inliers = np.take(points2, inliers)
+    points1_outliers = np.delete(points1, inliers, axis=0)
+    points2_outliers = np.delete(points2, inliers, axis=0)
+    for i in range(len(inliers)):
+        plt.plot([points1_inliers[i][0], points2_inliers[i][0]], [points1_inliers[i][1], points2_inliers[i][1]],
+                 mfc='r', c='y', lw=.4, ms=10, marker='o')
+    for i in range(len(points1_outliers)):
+        plt.plot([points1_outliers[i][0], points2_outliers[i][0]], [points1_outliers[i][1], points2_outliers[i][1]],
+                 mfc='r', c='b', lw=.4, ms=10, marker='o')
+    plt.show()
 
 
 def accumulate_homographies(H_succesive, m):
@@ -372,7 +389,8 @@ class PanoramicVideoGenerator:
         # Compute composite homographies from the central coordinate system.
         accumulated_homographies = accumulate_homographies(Hs, (len(Hs) - 1) // 2)
         self.homographies = np.stack(accumulated_homographies)
-        self.frames_for_panoramas = filter_homographies_with_translation(self.homographies, minimum_right_translation=5)
+        self.frames_for_panoramas = filter_homographies_with_translation(self.homographies,
+                                                                         minimum_right_translation=5)
         self.homographies = self.homographies[self.frames_for_panoramas]
 
     def generate_panoramic_images(self, number_of_panoramas):
@@ -461,8 +479,19 @@ class PanoramicVideoGenerator:
 
 
 if __name__ == '__main__':
-    im = plt.imread('external\\oxford1.jpg')
-    implot = plt.imshow(im)
-    corners = spread_out_corners(sol4_utils.read_image('external\\oxford1.jpg', sol4_utils.GREYSCALE), 7, 7, 3)
-    plt.scatter(x=corners[:, 0], y=corners[:, 1], c='r', s=1)
-    plt.show()
+    im1 = sol4_utils.read_image('external\\oxford1.jpg', sol4_utils.GREYSCALE)
+    im2 = sol4_utils.read_image('external\\oxford2.jpg', sol4_utils.GREYSCALE)
+    pyr1, _ = sol4_utils.build_gaussian_pyramid(im1, max_levels=3, filter_size=3)
+    pyr2, _ = sol4_utils.build_gaussian_pyramid(im2, max_levels=3, filter_size=3)
+    corners1, descriptors1 = find_features(pyr1)
+    corners2, descriptors2 = find_features(pyr2)
+    indices1, indices2 = match_features(descriptors1, descriptors2, min_score=0.8)
+    points1 = np.take(corners1, indices1, axis=0)
+    points2 = np.take(corners2, indices2, axis=0)
+    _, inliers_indices = ransac_homography(points1, points2, num_iter=50, inlier_tol=10)
+    display_matches(im1, im2, points1, points2, inliers_indices)
+    # im = plt.imread('external\\oxford1.jpg')
+    # implot = plt.imshow(im)
+    # corners = spread_out_corners(sol4_utils.read_image('external\\oxford1.jpg', sol4_utils.GREYSCALE), 7, 7, 3)
+    # plt.scatter(x=corners[:, 0], y=corners[:, 1], c='r', s=1)
+    # plt.show()
