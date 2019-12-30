@@ -12,6 +12,22 @@ from scipy.ndimage import label, center_of_mass, map_coordinates
 import sol4_utils
 import scipy.signal
 
+IM_WIDTH_INDEX = 1
+
+POINTS_FOR_RIGID = 2
+
+POINTS_FOR_TRANSLATION = 1
+
+Z = 2
+
+SECOND_MAX = -2
+
+Y = 1
+
+X = 0
+
+KERNEL_SIZE = 3
+
 N = 7
 
 M = 7
@@ -36,16 +52,16 @@ def harris_corner_detector(im):
     :param im: A 2D array representing an image.
     :return: An array with shape (N,2), where ret[i,:] are the [x,y] coordinates of the ith corner points.
     """
-    dx = scipy.signal.convolve2d(im, der_vec, mode='same')
-    dy = scipy.signal.convolve2d(im, der_vec.T, mode='same')
-    blur_ix_squared = sol4_utils.blur_spatial(dx * dx, 3)
-    blur_iy_squared = sol4_utils.blur_spatial(dy * dy, 3)
-    blur_ix_iy = sol4_utils.blur_spatial(dx * dy, 3)
+    dx = scipy.signal.convolve2d(im, der_vec, mode='same', boundary='symm')
+    dy = scipy.signal.convolve2d(im, der_vec.T, mode='same', boundary='symm')
+    blur_ix_squared = sol4_utils.blur_spatial(dx * dx, KERNEL_SIZE)
+    blur_iy_squared = sol4_utils.blur_spatial(dy * dy, KERNEL_SIZE)
+    blur_ix_iy = sol4_utils.blur_spatial(dx * dy, KERNEL_SIZE)
     det_m = blur_ix_squared * blur_iy_squared - blur_ix_iy * blur_ix_iy
     trace_m = blur_iy_squared + blur_ix_squared
     R = det_m - K * np.square(trace_m)
     R = non_maximum_suppression(R)
-    return np.flip(np.argwhere(R).reshape(-1, 2), 1)
+    return np.flip(np.argwhere(R).reshape(-1, 2), axis=1)
 
 
 def sample_descriptor(im, pos, desc_rad):
@@ -59,17 +75,16 @@ def sample_descriptor(im, pos, desc_rad):
     square_size = desc_rad * 2 + 1
     descriptors = np.empty((len(pos), square_size, square_size))
     for coordinate in range(len(pos)):
-        x = np.linspace(pos[coordinate][0] - desc_rad, pos[coordinate][0] + desc_rad, square_size)
-        y = np.linspace(pos[coordinate][1] - desc_rad, pos[coordinate][1] + desc_rad, square_size)
+        x = np.linspace(pos[coordinate][X] - desc_rad, pos[coordinate][X] + desc_rad, square_size)
+        y = np.linspace(pos[coordinate][Y] - desc_rad, pos[coordinate][Y] + desc_rad, square_size)
         xv, yv = np.meshgrid(x, y)
         # stack in flip
         coordinates_float = np.stack((yv, xv), axis=0)
-        # todo check args for map_coordinates
         descriptor = map_coordinates(im, coordinates_float, order=1, prefilter=False)
         mean = np.mean(descriptor)
         temp = descriptor - mean
-        # todo check division by zero
-        descriptors[coordinate, :, :] = temp / np.linalg.norm(temp)
+        norm = np.linalg.norm(temp)
+        descriptors[coordinate, :, :] = temp / np.where(norm == 0, 1, norm)
     return descriptors
 
 
@@ -111,8 +126,8 @@ def match_features(desc1, desc2, min_score):
                 2) An array with shape (M,) and dtype int of matching indices in desc2.
     """
     score_matrix = desc1.reshape(len(desc1), -1) @ desc2.reshape(len(desc2), -1).T
-    first_axis_max = np.sort(score_matrix, axis=0)[-2, :]
-    second_axis_max = np.sort(score_matrix, axis=1)[:, -2]
+    first_axis_max = np.partition(score_matrix, SECOND_MAX, axis=0)[SECOND_MAX, :]
+    second_axis_max = np.partition(score_matrix, SECOND_MAX, axis=1)[:, SECOND_MAX]
     second_biggest_second_axis = score_matrix >= second_axis_max.reshape(-1, 1)
     second_biggest_first_axis = (score_matrix.T >= first_axis_max.reshape(-1, 1)).T
     final_matrix = np.logical_and(np.logical_and(second_biggest_first_axis, second_biggest_second_axis),
@@ -130,7 +145,7 @@ def apply_homography(pos1, H12):
     """
     pos1 = np.concatenate((pos1, np.ones(pos1.shape[0]).reshape(-1, 1)), axis=1)
     x2_y2_z2 = H12 @ pos1.T
-    return (x2_y2_z2[:2, :] / x2_y2_z2[2, :]).T
+    return (x2_y2_z2[:Z, :] / x2_y2_z2[Z, :]).T
 
 
 def ransac_homography(points1, points2, num_iter, inlier_tol, translation_only=False):
@@ -150,9 +165,9 @@ def ransac_homography(points1, points2, num_iter, inlier_tol, translation_only=F
     for iteration in range(num_iter):
 
         if translation_only:
-            rand_indices = np.random.choice(len(points1), 1)
+            rand_indices = np.random.choice(len(points1), POINTS_FOR_TRANSLATION)
         else:
-            rand_indices = np.random.choice(len(points1), 2)
+            rand_indices = np.random.choice(len(points1), POINTS_FOR_RIGID)
         H12 = estimate_rigid_transform(np.take(points1, rand_indices, axis=0), np.take(points2, rand_indices, axis=0),
                                        translation_only)
         p2_tag = apply_homography(points1, H12)
@@ -177,7 +192,7 @@ def display_matches(im1, im2, points1, points2, inliers):
     :param inliers: An array with shape (S,) of inlier matches.
     """
     im = np.hstack((im1, im2))
-    points2[:, 0] += im1.shape[1]
+    points2[:, 0] += im1.shape[IM_WIDTH_INDEX]
     plt.imshow(im, cmap='gray')
     points1_inliers = np.take(points1, inliers, axis=0)
     points2_inliers = np.take(points2, inliers, axis=0)
@@ -204,7 +219,7 @@ def accumulate_homographies(H_succesive, m):
     :return: A list of M 3x3 homography matrices,
       where H2m[i] transforms points from coordinate system i to coordinate system m
     """
-    pass
+    result = []
 
 
 def compute_bounding_box(homography, w, h):
