@@ -128,7 +128,7 @@ def apply_homography(pos1, H12):
     :param H12: A 3x3 homography matrix.
     :return: An array with the same shape as pos1 with [x,y] point coordinates obtained from transforming pos1 using H12.
     """
-    pos1 = np.concatenate((pos1, np.ones(pos1.shape[0]).reshape(-1, 1)),axis=1)
+    pos1 = np.concatenate((pos1, np.ones(pos1.shape[0]).reshape(-1, 1)), axis=1)
     x2_y2_z2 = H12 @ pos1.T
     return (x2_y2_z2[:2, :] / x2_y2_z2[2, :]).T
 
@@ -156,12 +156,12 @@ def ransac_homography(points1, points2, num_iter, inlier_tol, translation_only=F
         H12 = estimate_rigid_transform(np.take(points1, rand_indices, axis=0), np.take(points2, rand_indices, axis=0),
                                        translation_only)
         p2_tag = apply_homography(points1, H12)
-        distance = np.square(np.linalg.norm(p2_tag - points2,axis=1))
+        distance = np.square(np.linalg.norm(p2_tag - points2, axis=1))
         inliers_indices_bool = distance < inlier_tol
         inliers_num = np.sum(inliers_indices_bool)
         if inliers_num > max_inliers[1]:
             max_inliers = [inliers_indices_bool, inliers_num]
-    inliers_indices = np.argwhere(max_inliers[0])
+    inliers_indices = np.argwhere(max_inliers[0]).reshape((-1,))
     H12_final = estimate_rigid_transform(np.take(points1, inliers_indices, axis=0),
                                          np.take(points2, inliers_indices, axis=0), translation_only)
     return [H12_final, inliers_indices.reshape(-1, )]
@@ -176,19 +176,19 @@ def display_matches(im1, im2, points1, points2, inliers):
     :param pos2: An aray shape (N,2), containing N rows of [x,y] coordinates of matched points in im2.
     :param inliers: An array with shape (S,) of inlier matches.
     """
-    im = np.hstack(im1, im2)
+    im = np.hstack((im1, im2))
     points2[:, 0] += im1.shape[1]
-    plt.imshow(im)
-    points1_inliers = np.take(points1, inliers)
-    points2_inliers = np.take(points2, inliers)
+    plt.imshow(im, cmap='gray')
+    points1_inliers = np.take(points1, inliers, axis=0)
+    points2_inliers = np.take(points2, inliers, axis=0)
     points1_outliers = np.delete(points1, inliers, axis=0)
     points2_outliers = np.delete(points2, inliers, axis=0)
-    for i in range(len(inliers)):
-        plt.plot([points1_inliers[i][0], points2_inliers[i][0]], [points1_inliers[i][1], points2_inliers[i][1]],
-                 mfc='r', c='y', lw=.4, ms=10, marker='o')
     for i in range(len(points1_outliers)):
         plt.plot([points1_outliers[i][0], points2_outliers[i][0]], [points1_outliers[i][1], points2_outliers[i][1]],
-                 mfc='r', c='b', lw=.4, ms=10, marker='o')
+                 mfc='r', c='b', lw=.4, ms=1, marker='o', markeredgewidth=0.0)
+    for i in range(len(inliers)):
+        plt.plot([points1_inliers[i][0], points2_inliers[i][0]], [points1_inliers[i][1], points2_inliers[i][1]],
+                 mfc='r', c='y', lw=.4, ms=1, marker='o', markeredgewidth=0.0)
     plt.show()
 
 
