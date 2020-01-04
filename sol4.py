@@ -5,12 +5,15 @@
 import numpy as np
 import os
 import matplotlib.pyplot as plt
+from shutil import rmtree
 
 from scipy.ndimage.morphology import generate_binary_structure
 from scipy.ndimage.filters import maximum_filter
 from scipy.ndimage import label, center_of_mass, map_coordinates
 import sol4_utils
 import scipy.signal
+
+HOMOGRAPHY_MAT_DIM = 3
 
 IM_WIDTH_INDEX = 1
 
@@ -108,6 +111,7 @@ def find_features(pyr):
                    These coordinates are provided at the pyramid level pyr[0].
                 2) A feature descriptor array with shape (N,K,K)
     """
+    # todo: check which radius to send here
     corners = spread_out_corners(pyr[ORIGINAL_IMAGE], M, N, DESC_RAD * pow(2, PYR_LVL_TO_USE))
     descriptors = sample_descriptor(pyr[PYR_LVL_TO_USE],
                                     get_pyramid_coordinates(corners, ORIGINAL_IMAGE, PYR_LVL_TO_USE),
@@ -219,7 +223,17 @@ def accumulate_homographies(H_succesive, m):
     :return: A list of M 3x3 homography matrices,
       where H2m[i] transforms points from coordinate system i to coordinate system m
     """
-    result = []
+    result = [np.eye(HOMOGRAPHY_MAT_DIM)]
+    for i in range(m - 1, -1, -1):
+        H = result[0] @ H_succesive[i]
+        result = [H / H[2, 2]] + result
+    for i in range(m, len(H_succesive)):
+        H = result[-1] @ np.linalg.inv(H_succesive[i])
+        result.append(H / H[2, 2])
+    # todo: to remove
+    if len(result) != len(H_succesive) + 1:
+        raise Exception()
+    return result
 
 
 def compute_bounding_box(homography, w, h):
@@ -231,7 +245,10 @@ def compute_bounding_box(homography, w, h):
     :return: 2x2 array, where the first row is [x,y] of the top left corner,
      and the second row is the [x,y] of the bottom right corner
     """
-    pass
+    corners = np.array([[0, 0], [0, h - 1], [w - 1, 0], [w - 1, h - 1]])
+    new_corners = apply_homography(corners, homography)
+    return np.array([[np.min(new_corners[:, 0]), np.min(new_corners[:, 1])],
+                     [np.max(new_corners[:, 0]), np.max(new_corners[:, 1])]]).astype(np.int)
 
 
 def warp_channel(image, homography):
@@ -241,7 +258,17 @@ def warp_channel(image, homography):
     :param homography: homograhpy.
     :return: A 2d warped image.
     """
-    pass
+    h = image.shape[0]
+    w = image.shape[1]
+    box = compute_bounding_box(homography, w, h)
+    x = np.arange(box[0][0], box[1][0] + 1)
+    y = np.arange(box[0][1], box[1][1] + 1)
+    xv, yv = np.meshgrid(x, y)
+    # stack in flip
+    coordinates = np.stack((xv, yv), axis=0).T
+    new_coordinates = apply_homography(coordinates.reshape(-1, 2), np.linalg.inv(homography))
+    new_coordinates = np.roll(new_coordinates.reshape(coordinates.shape).T, 1, 0)
+    return map_coordinates(image, new_coordinates, order=1, prefilter=False)
 
 
 def warp_image(image, homography):
@@ -472,18 +499,18 @@ class PanoramicVideoGenerator:
         assert self.panoramas is not None
         out_folder = 'tmp_folder_for_panoramic_frames/%s' % self.file_prefix
         try:
-            shutil.rmtree(out_folder)
+            rmtree(out_folder)
         except:
             print('could not remove folder')
             pass
         os.makedirs(out_folder)
         # save individual panorama images to 'tmp_folder_for_panoramic_frames'
         for i, panorama in enumerate(self.panoramas):
-            imsave('%s/panorama%02d.png' % (out_folder, i + 1), panorama)
+            plt.imsave('%s/panorama%02d.png' % (out_folder, i + 1), panorama)
         if os.path.exists('%s.mp4' % self.file_prefix):
             os.remove('%s.mp4' % self.file_prefix)
         # write output video to current folder
-        os.system('ffmpeg -framerate 3 -i %s/panorama%%02d.png %s.mp4' %
+        os.system('ffmpeg -framerate 9 -i %s/panorama%%02d.png %s.mp4' %
                   (out_folder, self.file_prefix))
 
     def show_panorama(self, panorama_index, figsize=(20, 20)):
@@ -493,20 +520,26 @@ class PanoramicVideoGenerator:
         plt.show()
 
 
-if __name__ == '__main__':
-    im1 = sol4_utils.read_image('external\\oxford1.jpg', sol4_utils.GREYSCALE)
-    im2 = sol4_utils.read_image('external\\oxford2.jpg', sol4_utils.GREYSCALE)
-    pyr1, _ = sol4_utils.build_gaussian_pyramid(im1, max_levels=3, filter_size=3)
-    pyr2, _ = sol4_utils.build_gaussian_pyramid(im2, max_levels=3, filter_size=3)
-    corners1, descriptors1 = find_features(pyr1)
-    corners2, descriptors2 = find_features(pyr2)
-    indices1, indices2 = match_features(descriptors1, descriptors2, min_score=0.8)
-    points1 = np.take(corners1, indices1, axis=0)
-    points2 = np.take(corners2, indices2, axis=0)
-    _, inliers_indices = ransac_homography(points1, points2, num_iter=50, inlier_tol=10)
-    display_matches(im1, im2, points1, points2, inliers_indices)
-    # im = plt.imread('external\\oxford1.jpg')
+# if __name__ == '__main__':
+#     panorama = PanoramicVideoGenerator('external', 'oxford', 2)
+#     panorama.align_images()
+#     panorama.generate_panoramic_images(1)
+#     panorama.show_panorama(0)
+
+    # im1 = sol4_utils.read_image('external\\oxford001.jpg', sol4_utils.GREYSCALE)
+    # im2 = sol4_utils.read_image('external\\oxford002.jpg', sol4_utils.GREYSCALE)
+    # pyr1, _ = sol4_utils.build_gaussian_pyramid(im1, max_levels=3, filter_size=3)
+    # pyr2, _ = sol4_utils.build_gaussian_pyramid(im2, max_levels=3, filter_size=3)
+    # corners1, descriptors1 = find_features(pyr1)
+    # corners2, descriptors2 = find_features(pyr2)
+    # indices1, indices2 = match_features(descriptors1, descriptors2, min_score=0.8)
+    # points1 = np.take(corners1, indices1, axis=0)
+    # points2 = np.take(corners2, indices2, axis=0)
+    # _, inliers_indices = ransac_homography(points1, points2, num_iter=50, inlier_tol=10)
+    # display_matches(im1, im2, points1, points2, inliers_indices)
+
+    # im = plt.imread('external\\oxford001.jpg')
     # implot = plt.imshow(im)
-    # corners = spread_out_corners(sol4_utils.read_image('external\\oxford1.jpg', sol4_utils.GREYSCALE), 7, 7, 3)
+    # corners = spread_out_corners(sol4_utils.read_image('external\\oxford001.jpg', sol4_utils.GREYSCALE), 7, 7, 3)
     # plt.scatter(x=corners[:, 0], y=corners[:, 1], c='r', s=1)
     # plt.show()

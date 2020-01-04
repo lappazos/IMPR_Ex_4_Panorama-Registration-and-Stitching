@@ -116,6 +116,7 @@ def build_gaussian_pyramid(im, max_levels, filter_size):
         gaussian_pyr.append(curr_level)
     return gaussian_pyr, filter
 
+
 def expand(im, filter):
     """
     pad with zeroes & blur
@@ -128,6 +129,7 @@ def expand(im, filter):
     new_im = convolve(new_im, 2 * filter)
     new_im = convolve(new_im, 2 * filter.T)
     return new_im
+
 
 def build_laplacian_pyramid(im, max_levels, filter_size):
     """
@@ -147,6 +149,7 @@ def build_laplacian_pyramid(im, max_levels, filter_size):
     laplacian_pyr.append(gaussian_pyr[-1])
     return laplacian_pyr, filter
 
+
 def laplacian_to_image(lpyr, filter_vec, coeff):
     """
     e reconstruction of an image from its Laplacian Pyramid
@@ -160,6 +163,7 @@ def laplacian_to_image(lpyr, filter_vec, coeff):
     for i in range(1, len(lpyr)):
         lpyr[-i - 1] += expand(lpyr[-i], filter_vec)
     return lpyr[0]
+
 
 def pyramid_blending(im1, im2, mask, max_levels, filter_size_im, filter_size_mask):
     """
