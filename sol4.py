@@ -1,15 +1,13 @@
-# Initial code for ex4.
-# You may change this code, but keep the functions' signatures
-# You can also split the code to multiple files as long as this file's API is unchanged 
-
 import numpy as np
 import os
 import matplotlib.pyplot as plt
-from shutil import rmtree
 
 from scipy.ndimage.morphology import generate_binary_structure
 from scipy.ndimage.filters import maximum_filter
 from scipy.ndimage import label, center_of_mass, map_coordinates
+import shutil
+from imageio import imwrite
+
 import sol4_utils
 import scipy.signal
 
@@ -45,8 +43,6 @@ der_vec = np.array([1, 0, -1]).reshape(1, 3)
 
 K = 0.04
 
-MIN_SCORE = 0.5
-
 
 def harris_corner_detector(im):
     """
@@ -76,19 +72,22 @@ def sample_descriptor(im, pos, desc_rad):
     :return: A 3D array with shape (N,K,K) containing the ith descriptor at desc[i,:,:].
     """
     square_size = desc_rad * 2 + 1
-    descriptors = np.empty((len(pos), square_size, square_size))
-    for coordinate in range(len(pos)):
-        x = np.linspace(pos[coordinate][X] - desc_rad, pos[coordinate][X] + desc_rad, square_size)
-        y = np.linspace(pos[coordinate][Y] - desc_rad, pos[coordinate][Y] + desc_rad, square_size)
-        xv, yv = np.meshgrid(x, y)
-        # stack in flip
-        coordinates_float = np.stack((yv, xv), axis=0)
-        descriptor = map_coordinates(im, coordinates_float, order=1, prefilter=False)
-        mean = np.mean(descriptor)
-        temp = descriptor - mean
-        norm = np.linalg.norm(temp)
-        descriptors[coordinate, :, :] = temp / np.where(norm == 0, 1, norm)
-    return descriptors
+
+    x = np.linspace(pos[:, X] - desc_rad, pos[:, X] + desc_rad, square_size).T
+    y = np.linspace(pos[:, Y] - desc_rad, pos[:, Y] + desc_rad, square_size).T
+    xv = np.repeat(x, square_size, axis=0).reshape((pos.shape[0], square_size, square_size))
+    yv = np.transpose(np.repeat(y, square_size, axis=0).reshape((pos.shape[0], square_size, square_size)), (0, 2, 1))
+    # stack in flip
+    coordinates_float = np.stack((yv, xv), axis=0)
+    descriptors = map_coordinates(im, coordinates_float, order=1, prefilter=False)
+    mean = np.mean(descriptors, axis=(1, 2)).reshape(1, -1)
+    temp = (descriptors.reshape([pos.shape[0], -1]).T - mean).T.reshape(
+        [pos.shape[0], square_size, square_size])
+    norm = np.linalg.norm(temp, axis=(1, 2))
+    descriptors = (temp.reshape([pos.shape[0], -1]).T / np.where(norm == 0, 1, norm).reshape(mean.shape)).T.reshape(
+        [pos.shape[0], square_size, square_size])
+
+    return descriptors.reshape(len(pos), square_size, square_size)
 
 
 def get_pyramid_coordinates(pos, input_level, output_level):
@@ -111,7 +110,6 @@ def find_features(pyr):
                    These coordinates are provided at the pyramid level pyr[0].
                 2) A feature descriptor array with shape (N,K,K)
     """
-    # todo: check which radius to send here
     corners = spread_out_corners(pyr[ORIGINAL_IMAGE], M, N, DESC_RAD * pow(2, PYR_LVL_TO_USE))
     descriptors = sample_descriptor(pyr[PYR_LVL_TO_USE],
                                     get_pyramid_coordinates(corners, ORIGINAL_IMAGE, PYR_LVL_TO_USE),
@@ -142,10 +140,11 @@ def match_features(desc1, desc2, min_score):
 
 def apply_homography(pos1, H12):
     """
-    Apply homography to inhomogenous points.
-    :param pos1: An array with shape (N,2) of [x,y] point coordinates.
+    Apply homography to inhomogenous points. :param pos1: An array with shape (N,2) of [x,y] point coordinates.
+    :param pos1: An array with shape (N,2) of [x,y] point coordinates
     :param H12: A 3x3 homography matrix.
-    :return: An array with the same shape as pos1 with [x,y] point coordinates obtained from transforming pos1 using H12.
+    :return: An array with the same shape as pos1 with [x,y] point coordinates
+    obtained from transforming pos1 using H12.
     """
     pos1 = np.concatenate((pos1, np.ones(pos1.shape[0]).reshape(-1, 1)), axis=1)
     x2_y2_z2 = H12 @ pos1.T
@@ -191,8 +190,8 @@ def display_matches(im1, im2, points1, points2, inliers):
     Dispalay matching points.
     :param im1: A grayscale image.
     :param im2: A grayscale image.
-    :parma pos1: An aray shape (N,2), containing N rows of [x,y] coordinates of matched points in im1.
-    :param pos2: An aray shape (N,2), containing N rows of [x,y] coordinates of matched points in im2.
+    :param points1: An array shape (N,2), containing N rows of [x,y] coordinates of matched points in im1.
+    :param points2: An array shape (N,2), containing N rows of [x,y] coordinates of matched points in im2.
     :param inliers: An array with shape (S,) of inlier matches.
     """
     im = np.hstack((im1, im2))
@@ -215,7 +214,7 @@ def accumulate_homographies(H_succesive, m):
     """
     Convert a list of succesive homographies to a
     list of homographies to a common reference frame.
-    :param H_successive: A list of M-1 3x3 homography
+    :param H_succesive: A list of M-1 3x3 homography
       matrices where H_successive[i] is a homography which transforms points
       from coordinate system i to coordinate system i+1.
     :param m: Index of the coordinate system towards which we would like to
@@ -230,9 +229,6 @@ def accumulate_homographies(H_succesive, m):
     for i in range(m, len(H_succesive)):
         H = result[-1] @ np.linalg.inv(H_succesive[i])
         result.append(H / H[2, 2])
-    # todo: to remove
-    if len(result) != len(H_succesive) + 1:
-        raise Exception()
     return result
 
 
@@ -442,7 +438,8 @@ class PanoramicVideoGenerator:
         """
         assert self.homographies is not None
 
-        # compute bounding boxes of all warped input images in the coordinate system of the middle image (as given by the homographies)
+        # compute bounding boxes of all warped input images in the coordinate system of the middle image (as given by
+        # the homographies)
         self.bounding_boxes = np.zeros((self.frames_for_panoramas.size, 2, 2))
         for i in range(self.frames_for_panoramas.size):
             self.bounding_boxes[i] = compute_bounding_box(self.homographies[i], self.w, self.h)
@@ -460,7 +457,8 @@ class PanoramicVideoGenerator:
             slice_center_2d = np.array([slice_centers[i], self.h // 2])[None, :]
             # homography warps the slice center to the coordinate system of the middle image
             warped_centers = [apply_homography(slice_center_2d, h) for h in self.homographies]
-            # we are actually only interested in the x coordinate of each slice center in the panoramas' coordinate system
+            # we are actually only interested in the x coordinate of each slice center in the panoramas' coordinate
+            # system
             warped_slice_centers[i] = np.array(warped_centers)[:, :, 0].squeeze() - global_offset[0]
 
         panorama_size = np.max(self.bounding_boxes, axis=(0, 1)).astype(np.int) + 1
@@ -499,18 +497,18 @@ class PanoramicVideoGenerator:
         assert self.panoramas is not None
         out_folder = 'tmp_folder_for_panoramic_frames/%s' % self.file_prefix
         try:
-            rmtree(out_folder)
+            shutil.rmtree(out_folder)
         except:
             print('could not remove folder')
             pass
         os.makedirs(out_folder)
         # save individual panorama images to 'tmp_folder_for_panoramic_frames'
         for i, panorama in enumerate(self.panoramas):
-            plt.imsave('%s/panorama%02d.png' % (out_folder, i + 1), panorama)
+            imwrite('%s/panorama%02d.png' % (out_folder, i + 1), panorama)
         if os.path.exists('%s.mp4' % self.file_prefix):
             os.remove('%s.mp4' % self.file_prefix)
         # write output video to current folder
-        os.system('ffmpeg -framerate 9 -i %s/panorama%%02d.png %s.mp4' %
+        os.system('ffmpeg -framerate 3 -i %s/panorama%%02d.png %s.mp4' %
                   (out_folder, self.file_prefix))
 
     def show_panorama(self, panorama_index, figsize=(20, 20)):
@@ -518,28 +516,3 @@ class PanoramicVideoGenerator:
         plt.figure(figsize=figsize)
         plt.imshow(self.panoramas[panorama_index].clip(0, 1))
         plt.show()
-
-
-# if __name__ == '__main__':
-#     panorama = PanoramicVideoGenerator('external', 'oxford', 2)
-#     panorama.align_images()
-#     panorama.generate_panoramic_images(1)
-#     panorama.show_panorama(0)
-
-    # im1 = sol4_utils.read_image('external\\oxford001.jpg', sol4_utils.GREYSCALE)
-    # im2 = sol4_utils.read_image('external\\oxford002.jpg', sol4_utils.GREYSCALE)
-    # pyr1, _ = sol4_utils.build_gaussian_pyramid(im1, max_levels=3, filter_size=3)
-    # pyr2, _ = sol4_utils.build_gaussian_pyramid(im2, max_levels=3, filter_size=3)
-    # corners1, descriptors1 = find_features(pyr1)
-    # corners2, descriptors2 = find_features(pyr2)
-    # indices1, indices2 = match_features(descriptors1, descriptors2, min_score=0.8)
-    # points1 = np.take(corners1, indices1, axis=0)
-    # points2 = np.take(corners2, indices2, axis=0)
-    # _, inliers_indices = ransac_homography(points1, points2, num_iter=50, inlier_tol=10)
-    # display_matches(im1, im2, points1, points2, inliers_indices)
-
-    # im = plt.imread('external\\oxford001.jpg')
-    # implot = plt.imshow(im)
-    # corners = spread_out_corners(sol4_utils.read_image('external\\oxford001.jpg', sol4_utils.GREYSCALE), 7, 7, 3)
-    # plt.scatter(x=corners[:, 0], y=corners[:, 1], c='r', s=1)
-    # plt.show()
